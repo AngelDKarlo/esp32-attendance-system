@@ -3,9 +3,9 @@
 require_once __DIR__ . '/config.php';
 
 $host = 'localhost';
-$db   = 'esp32_attendance_v3';
+$db   = 'esp32_attendance';
 $user = 'root';
-$pass = 'TuContraseñaSegura123';
+$pass = '';
 $charset = 'utf8mb4';
 
 $dsn = "mysql:host=$host;dbname=$db;charset=$charset";
