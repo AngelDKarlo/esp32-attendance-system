@@ -69,6 +69,7 @@ try {
 
         // 3. Resolver clase activa y estado (presente / retardo / falta)
         $claseActiva = obtenerClaseActiva($pdo, $alumno);
+        validarClaseParaRegistro($pdo, $alumno, $claseActiva);
         validarAulaDispositivo($dispositivo, $claseActiva);
         $claseId = $claseActiva ? $claseActiva['id'] : null;
 
@@ -147,6 +148,7 @@ try {
     // ¿Ya registró asistencia para la clase de este momento?
     // ---------------------------------------------------------------------
     $claseActiva = obtenerClaseActiva($pdo, $usuario);
+    validarClaseParaRegistro($pdo, $usuario, $claseActiva);
     validarAulaDispositivo($dispositivo, $claseActiva);
     if (yaRegistroAsistencia($pdo, $usuario['matricula'], $claseActiva ? $claseActiva['id'] : null)) {
         responder([

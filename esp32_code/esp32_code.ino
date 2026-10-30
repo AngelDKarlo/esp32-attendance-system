@@ -9,8 +9,8 @@
 // =========================================================================
 // --- CONFIGURACIÓN DE RED Y SERVIDOR ---
 // =========================================================================
-const char* ssid = "TU_SSID_WIFI";          // Nombre de tu red WiFi
-const char* password = "TU_PASSWORD_WIFI";  // Contraseña de tu red WiFi
+const char* ssid = "EXT 2.4";          // Nombre de tu red WiFi
+const char* password = "Abttbx7z99";      // Contraseña de tu red WiFi
 
 // URL base del servidor (IP del servidor + carpeta del proyecto + /api)
 //
@@ -20,7 +20,7 @@ const char* password = "TU_PASSWORD_WIFI";  // Contraseña de tu red WiFi
 //     "http://44.211.83.193/si_v2/api"
 // En tu computadora con XAMPP (misma red WiFi que la caja):
 //     "http://192.168.1.15/esp32-attendance-system/api"
-const String serverBaseUrl = "http://44.211.83.193/si_v3/api";
+const String serverBaseUrl = "http://192.168.1.97/esp32-attendance-system/api";
 
 // =========================================================================
 // --- IDENTIFICADOR ÚNICO DE ESTA CAJA ---
@@ -34,6 +34,10 @@ const String DEVICE_ID = "ESP32-A214-01";
 // =========================================================================
 // --- CONFIGURACIÓN DEL RFID ---
 // =========================================================================
+// Cableado del RC522 (SPI por defecto del ESP32):
+//   SDA(SS) -> GPIO5   SCK -> GPIO18   MOSI -> GPIO23   MISO -> GPIO19
+//   RST     -> GPIO4   3.3V -> 3V3     GND  -> GND
+// NO usar GPIO21 ni GPIO22 para el RC522: son el bus I2C de la LCD.
 #define SS_PIN  5
 #define RST_PIN 4
 MFRC522 rfid(SS_PIN, RST_PIN);
@@ -56,8 +60,8 @@ char matriz[FILAS][COLUMNAS] = {
   {'*','0','#'}
 };
 
-byte pinesFilas[FILAS] = {32, 33, 26, 27};
-byte pinesColumnas[COLUMNAS] = {14, 12, 13};
+byte pinesFilas[FILAS] = {13, 12, 14, 27};
+byte pinesColumnas[COLUMNAS] = {26, 25, 33};
 
 Keypad teclado = Keypad(makeKeymap(matriz), pinesFilas, pinesColumnas, FILAS, COLUMNAS);
 
@@ -129,6 +133,16 @@ void setup() {
 
   lcd.init();
   lcd.backlight();
+
+  // Diagnóstico del lector: un RC522 conectado responde 0x91 o 0x92.
+  // 0x00 o 0xFF significa que no hay comunicación (cables o pin SS mal).
+  byte versionRfid = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.print("RC522 version: 0x");
+  Serial.println(versionRfid, HEX);
+  if (versionRfid == 0x00 || versionRfid == 0xFF) {
+    mostrarMensaje("RFID NO RESPONDE", "Revisa cables");
+    delay(4000);
+  }
 
   mostrarMensaje("Caja Asistencia", DEVICE_ID);
   delay(1500);

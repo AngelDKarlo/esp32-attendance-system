@@ -56,6 +56,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$clase) {
         $error = 'No tienes permiso para pasar lista en esa clase.';
+    } elseif (in_array($accion, ['inhabil', 'quitar_inhabil'], true)) {
+        // El docente decide si un día no cuenta (suspensión, puente, paro...)
+        $diasNum = ['lunes' => 1, 'martes' => 2, 'miercoles' => 3, 'jueves' => 4, 'viernes' => 5, 'sabado' => 6];
+        $fechaOk = DateTime::createFromFormat('Y-m-d', $fecha);
+        $fechaOk = $fechaOk && $fechaOk->format('Y-m-d') === $fecha;
+
+        if (!$fechaOk) {
+            $error = 'Indica una fecha válida.';
+        } elseif ((int)date('N', strtotime($fecha)) !== ($diasNum[$clase['dia_semana']] ?? 0)) {
+            $error = 'El ' . date('d/m/Y', strtotime($fecha)) . ' no cae en ' . $clase['dia_semana']
+                   . ', que es el día de esta clase.';
+        } else {
+            try {
+                if ($accion === 'quitar_inhabil') {
+                    $pdo->prepare("DELETE FROM dias_inhabiles WHERE clase_id = :c AND fecha = :f")
+                        ->execute(['c' => $claseId, 'f' => $fecha]);
+                    $success = 'El ' . date('d/m/Y', strtotime($fecha)) . ' vuelve a contar como día de clase.';
+                } else {
+                    $pdo->beginTransaction();
+                    $pdo->prepare("
+                        INSERT INTO dias_inhabiles (clase_id, fecha, motivo, marcado_por)
+                        VALUES (:c, :f, :m, :u)
+                        ON DUPLICATE KEY UPDATE motivo = VALUES(motivo), marcado_por = VALUES(marcado_por)
+                    ")->execute([
+                        'c' => $claseId, 'f' => $fecha,
+                        'm' => mb_substr(trim($_POST['motivo'] ?? ''), 0, 150) ?: null,
+                        'u' => $user['matricula'],
+                    ]);
+                    // Las faltas de ese día ya no aplican; las asistencias que sí se tomaron se conservan
+                    $pdo->prepare("DELETE FROM asistencias WHERE clase_id = :c AND fecha = :f AND estado = 'falta'")
+                        ->execute(['c' => $claseId, 'f' => $fecha]);
+                    $pdo->commit();
+                    $success = 'El ' . date('d/m/Y', strtotime($fecha)) . ' quedó como día inhábil: no cuenta para el porcentaje de nadie.';
+                }
+            } catch (PDOException $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $error = mensajeErrorBD($e, 'guardar el día inhábil', $user['rol'] ?? null, 'pase_lista.php');
+            }
+        }
     } elseif (!in_array($estado, ['presente', 'retardo', 'falta', 'justificado'], true)) {
         $error = 'El estado seleccionado no es válido.';
     } else {
@@ -107,6 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Mantener la vista donde estaba
     $_GET['clase_id'] = $claseId;
     $_GET['fecha'] = $fecha;
+    $_GET['grupo'] = $_POST['grupo'] ?? '';
 }
 
 // -------------------------------------------------------------------------
@@ -114,6 +156,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // -------------------------------------------------------------------------
 $claseSeleccionada = null;
 $listaAlumnos = [];
+$diaInhabil = false;
+$motivoInhabil = null;
+$statsCurso = ['sesiones' => 0, 'alumnos' => []];
 $resumen = ['presente' => 0, 'retardo' => 0, 'falta' => 0, 'justificado' => 0, 'sin_registro' => 0];
 
 $fechaConsulta = $_GET['fecha'] ?? fechaHoy();
@@ -137,6 +182,14 @@ try {
         ")->fetchAll();
     }
 
+    // Grupos disponibles y filtro opcional para acotar el selector de clases
+    $gruposDisponibles = array_values(array_unique(array_filter(array_column($misClases, 'grupo'), 'strlen')));
+    sort($gruposDisponibles);
+    $grupoFiltro = trim($_GET['grupo'] ?? '');
+    if ($grupoFiltro !== '') {
+        $misClases = array_values(array_filter($misClases, fn($c) => (string)$c['grupo'] === $grupoFiltro));
+    }
+
     $claseId = isset($_GET['clase_id']) ? (int)$_GET['clase_id'] : 0;
 
     if ($claseId > 0) {
@@ -146,6 +199,25 @@ try {
             $error = $error ?: 'Esa clase no está entre las tuyas.';
         } else {
             generarFaltasParaClaseYFecha($pdo, $claseId, $fechaConsulta);
+
+            $stmt = $pdo->prepare("SELECT motivo FROM dias_inhabiles WHERE clase_id = :c AND fecha = :f");
+            $stmt->execute(['c' => $claseId, 'f' => $fechaConsulta]);
+            $filaInhabil = $stmt->fetch();
+            $diaInhabil = $filaInhabil !== false;
+            $motivoInhabil = $diaInhabil ? $filaInhabil['motivo'] : null;
+
+            // Porcentaje de cada alumno sobre todo el curso (todos los días de la misma materia y grupo)
+            $stmt = $pdo->prepare("
+                SELECT id FROM clases
+                WHERE docente_id = :d AND nombre_materia = :n
+                  AND carrera <=> :c AND grupo <=> :g AND semestre <=> :s
+            ");
+            $stmt->execute([
+                'd' => $claseSeleccionada['docente_id'], 'n' => $claseSeleccionada['nombre_materia'],
+                'c' => $claseSeleccionada['carrera'], 'g' => $claseSeleccionada['grupo'],
+                's' => $claseSeleccionada['semestre'],
+            ]);
+            $statsCurso = estadisticasCurso($pdo, $stmt->fetchAll(PDO::FETCH_COLUMN));
             $stmt = $pdo->prepare("
                 SELECT u.matricula, u.nombre, u.grupo, u.semestre, u.tarjeta_rfid, u.id_telegram,
                        a.estado, a.hora, a.tipo, a.dispositivo_id,
@@ -202,8 +274,20 @@ require_once __DIR__ . '/header.php';
 <div class="filter-card">
     <form action="pase_lista.php" method="GET">
         <div class="filter-grid">
+            <div class="form-group" style="margin-bottom: 0;">
+                <label for="grupo">GRUPO</label>
+                <select id="grupo" name="grupo" class="form-select" onchange="this.form.clase_id.value=''; this.form.submit()">
+                    <option value="">Todos los grupos</option>
+                    <?php foreach (($gruposDisponibles ?? []) as $g): ?>
+                        <option value="<?php echo htmlspecialchars($g); ?>" <?php echo (($grupoFiltro ?? '') === (string)$g) ? 'selected' : ''; ?>>
+                            Grupo <?php echo htmlspecialchars($g); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
             <div class="form-group" style="margin-bottom: 0; grid-column: span 2;">
-                <label for="clase_id">CLASE</label>
+                <label for="clase_id">MATERIA / CLASE</label>
                 <select id="clase_id" name="clase_id" class="form-select" onchange="this.form.submit()">
                     <option value="">Selecciona una clase...</option>
                     <?php foreach ($misClases as $c): ?>
@@ -250,6 +334,7 @@ require_once __DIR__ . '/header.php';
                         <th>Día</th>
                         <th>Horario</th>
                         <th>Materia</th>
+                        <th>Grupo</th>
                         <th>Aula</th>
                         <th>Alumnos</th>
                         <th>Acción</th>
@@ -258,7 +343,7 @@ require_once __DIR__ . '/header.php';
                 <tbody>
                     <?php if (empty($misClases)): ?>
                         <tr>
-                            <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 30px 10px;">
+                            <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px 10px;">
                                 No tienes clases asignadas. Pide al administrador que te las registre.
                             </td>
                         </tr>
@@ -279,6 +364,7 @@ require_once __DIR__ . '/header.php';
                                     <div style="font-size: 0.8rem; color: var(--text-muted);">a <?php echo date('h:i A', strtotime($c['hora_fin'])); ?></div>
                                 </td>
                                 <td><strong><?php echo htmlspecialchars($c['nombre_materia']); ?></strong></td>
+                                <td><?php echo htmlspecialchars($c['grupo'] ?: '—'); ?></td>
                                 <td><?php echo htmlspecialchars($c['aula'] ?: 'Sin asignar'); ?></td>
                                 <td><?php echo (int)$c['inscritos']; ?></td>
                                 <td>
@@ -354,11 +440,55 @@ require_once __DIR__ . '/header.php';
             </div>
         <?php endif; ?>
 
+        <?php if ($diaInhabil): ?>
+            <div class="alert alert-warning" style="margin: 0 0 16px 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+                <span>
+                    <i class="fa-solid fa-calendar-xmark"></i>
+                    Este día está marcado como <strong>inhábil</strong>
+                    <?php echo $motivoInhabil ? '(' . htmlspecialchars($motivoInhabil) . ')' : ''; ?>:
+                    no se pasa lista en la caja y no cuenta para el porcentaje.
+                </span>
+                <form action="pase_lista.php" method="POST" style="margin: 0;">
+                    <input type="hidden" name="accion" value="quitar_inhabil">
+                    <input type="hidden" name="clase_id" value="<?php echo (int)$claseSeleccionada['id']; ?>">
+                    <input type="hidden" name="fecha" value="<?php echo htmlspecialchars($fechaConsulta); ?>">
+                    <input type="hidden" name="grupo" value="<?php echo htmlspecialchars($grupoFiltro ?? ''); ?>">
+                    <input type="hidden" name="estado" value="presente">
+                    <button type="submit" class="btn-reset" style="padding: 6px 12px; height: auto;">Quitar marca</button>
+                </form>
+            </div>
+        <?php else: ?>
+            <details style="margin-bottom: 16px;">
+                <summary style="cursor: pointer; font-size: 0.85rem; color: var(--text-muted);">
+                    <i class="fa-solid fa-calendar-xmark"></i> Marcar un día como inhábil (no cuenta para el porcentaje)
+                </summary>
+                <form action="pase_lista.php" method="POST" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-top: 10px;"
+                      onsubmit="return confirm('Se borrarán las faltas de ese día y nadie tendrá falta. ¿Continuar?')">
+                    <input type="hidden" name="accion" value="inhabil">
+                    <input type="hidden" name="clase_id" value="<?php echo (int)$claseSeleccionada['id']; ?>">
+                    <input type="hidden" name="grupo" value="<?php echo htmlspecialchars($grupoFiltro ?? ''); ?>">
+                    <input type="hidden" name="estado" value="presente">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label for="fecha_inhabil">FECHA</label>
+                        <input type="date" id="fecha_inhabil" name="fecha" class="form-date" required
+                               value="<?php echo htmlspecialchars($fechaConsulta); ?>">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0; min-width: 220px;">
+                        <label for="motivo_inhabil">MOTIVO (opcional)</label>
+                        <input type="text" id="motivo_inhabil" name="motivo" class="form-select" maxlength="150"
+                               placeholder="Ej: Suspensión oficial, puente...">
+                    </div>
+                    <button type="submit" class="btn-filter"><i class="fa-solid fa-ban"></i> Marcar inhábil</button>
+                </form>
+            </details>
+        <?php endif; ?>
+
         <div class="table-responsive">
             <table class="custom-table">
                 <thead>
                     <tr>
                         <th>Alumno</th>
+                        <th>% asistencia</th>
                         <th>Estado</th>
                         <th>Hora de registro</th>
                         <th>Método</th>
@@ -368,7 +498,7 @@ require_once __DIR__ . '/header.php';
                 <tbody>
                     <?php if (empty($listaAlumnos)): ?>
                         <tr>
-                            <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px 10px;">
+                            <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 30px 10px;">
                                 No hay alumnos inscritos en esta clase.
                                 <a href="inscripciones.php?clase_id=<?php echo (int)$claseSeleccionada['id']; ?>">Inscribirlos ahora</a>
                             </td>
@@ -387,6 +517,22 @@ require_once __DIR__ . '/header.php';
                                             <i class="fa-brands fa-telegram" style="color: var(--danger);" title="Sin Telegram: necesita tu firma"></i>
                                         <?php endif; ?>
                                     </div>
+                                </td>
+                                <td>
+                                    <?php $est = $statsCurso['alumnos'][$al['matricula']] ?? null; ?>
+                                    <?php if ($est && $est['porcentaje'] !== null): ?>
+                                        <strong style="color: <?php echo $est['en_riesgo'] ? '#ef4444' : '#22c55e'; ?>;">
+                                            <?php echo formatoPorcentaje($est['porcentaje']); ?>
+                                        </strong>
+                                        <div style="font-size: 0.72rem; color: var(--text-muted);">
+                                            <?php echo $est['asistidas']; ?>/<?php echo $statsCurso['sesiones']; ?> clases · <?php echo $est['faltas']; ?> faltas
+                                        </div>
+                                        <?php if ($est['en_riesgo']): ?>
+                                            <span class="badge badge-falta" style="font-size: 0.65rem;">En riesgo</span>
+                                        <?php endif; ?>
+                                    <?php else: ?>
+                                        <span style="color: var(--text-muted);">—</span>
+                                    <?php endif; ?>
                                 </td>
                                 <td>
                                     <?php if ($al['estado']): ?>
@@ -418,6 +564,7 @@ require_once __DIR__ . '/header.php';
                                 <td>
                                     <div style="display: flex; gap: 4px; flex-wrap: wrap;">
                                         <form action="pase_lista.php" method="POST" style="display: flex; gap: 4px;">
+                                            <input type="hidden" name="grupo" value="<?php echo htmlspecialchars($grupoFiltro ?? ''); ?>">
                                             <input type="hidden" name="clase_id" value="<?php echo (int)$claseSeleccionada['id']; ?>">
                                             <input type="hidden" name="fecha" value="<?php echo htmlspecialchars($fechaConsulta); ?>">
                                             <input type="hidden" name="alumno_id" value="<?php echo htmlspecialchars($al['matricula']); ?>">
@@ -459,6 +606,15 @@ require_once __DIR__ . '/header.php';
         </div>
     </div>
 
+<?php endif; ?>
+
+<?php if ($claseSeleccionada && $fechaConsulta === fechaHoy()): ?>
+<script>
+// Lista dinámica: se recarga sola para reflejar las lecturas de la caja.
+const urlVivo = 'pase_lista.php?<?php echo http_build_query(['grupo' => $grupoFiltro ?? '', 'clase_id' => (int)$claseSeleccionada['id'], 'fecha' => $fechaConsulta]); ?>';
+// GET (no reload) para no reenviar un POST de corrección manual.
+setTimeout(() => location.replace(urlVivo), 20000);
+</script>
 <?php endif; ?>
 
 <?php

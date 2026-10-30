@@ -9,3 +9,6 @@ Thumbs.db
 
 # Dependencias del prototipo en Node
 node_modules/
+
+# Archivos subidos por los usuarios (fotos de justificantes)
+uploads/

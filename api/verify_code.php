@@ -116,6 +116,7 @@ try {
 
     // 4. Clase activa y estado del registro
     $claseActiva = obtenerClaseActiva($pdo, $usuario);
+    validarClaseParaRegistro($pdo, $usuario, $claseActiva);
     validarAulaDispositivo($dispositivo, $claseActiva);
     $claseId = $claseActiva ? $claseActiva['id'] : null;
 

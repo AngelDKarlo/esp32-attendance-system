@@ -3,6 +3,10 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+// Para la insignia de justificantes pendientes del menú
+require_once __DIR__ . '/includes/conexion.php';
+require_once __DIR__ . '/api/attendance_helper.php';
+
 // Verificar si el usuario está autenticado
 if (!isset($_SESSION['usuario'])) {
     header("Location: login.php");
@@ -75,6 +79,38 @@ $current_page = basename($_SERVER['PHP_SELF']);
                     <a href="mis_clases.php">
                         <i class="fa-solid fa-graduation-cap"></i>
                         <span>Mis Clases</span>
+                    </a>
+                </li>
+                <li class="menu-item <?php echo $current_page === 'justificar.php' ? 'active' : ''; ?>">
+                    <a href="justificar.php">
+                        <i class="fa-solid fa-file-medical"></i>
+                        <span>Justificar Falta</span>
+                    </a>
+                </li>
+            <?php endif; ?>
+
+            <?php if (in_array($user['rol'], ['docente', 'administrativo'], true)): ?>
+                <?php
+                    // Justificantes por revisar (insignia en el menú)
+                    $justPendientes = 0;
+                    if (isset($pdo) && function_exists('contarJustificantesPendientes')) {
+                        try {
+                            $justPendientes = contarJustificantesPendientes($pdo, $user['rol'] === 'docente' ? $user['matricula'] : null);
+                        } catch (Throwable $e) {
+                            $justPendientes = 0;
+                        }
+                    }
+                ?>
+                <li class="menu-item <?php echo $current_page === 'mis_grupos.php' ? 'active' : ''; ?>">
+                    <a href="mis_grupos.php">
+                        <i class="fa-solid fa-people-group"></i>
+                        <span><?php echo $user['rol'] === 'docente' ? 'Mis Grupos' : 'Grupos y Alumnos'; ?></span>
+                    </a>
+                </li>
+                <li class="menu-item <?php echo $current_page === 'justificantes.php' ? 'active' : ''; ?>">
+                    <a href="justificantes.php">
+                        <i class="fa-solid fa-file-circle-check"></i>
+                        <span>Justificantes<?php echo $justPendientes > 0 ? ' <span class="badge badge-retardo" style="padding: 1px 7px;">' . $justPendientes . '</span>' : ''; ?></span>
                     </a>
                 </li>
             <?php endif; ?>

@@ -33,19 +33,19 @@ try {
     // ---------------------------------------------------------------------
     $stmt = $pdo->prepare("
         SELECT
-            c.id, c.nombre_materia, c.dia_semana, c.hora_inicio, c.hora_fin, c.aula,
+            c.id, c.nombre_materia, c.dia_semana, c.hora_inicio, c.hora_fin, c.aula, c.limite_faltas,
             doc.nombre AS docente_nombre,
             (SELECT COUNT(DISTINCT a.fecha) FROM asistencias a
-              WHERE a.clase_id = c.id) AS sesiones,
+              WHERE a.clase_id = c.id AND NOT EXISTS (SELECT 1 FROM dias_inhabiles di WHERE di.clase_id = a.clase_id AND di.fecha = a.fecha)) AS sesiones,
             (SELECT COUNT(DISTINCT a.fecha) FROM asistencias a
-              WHERE a.clase_id = c.id AND a.usuario_id = :m1
+              WHERE a.clase_id = c.id AND NOT EXISTS (SELECT 1 FROM dias_inhabiles di WHERE di.clase_id = a.clase_id AND di.fecha = a.fecha) AND a.usuario_id = :m1
                 AND a.estado IN ('presente','retardo','justificado')) AS asistidas,
             (SELECT COUNT(DISTINCT a.fecha) FROM asistencias a
-              WHERE a.clase_id = c.id AND a.usuario_id = :m2 AND a.estado = 'presente') AS presentes,
+              WHERE a.clase_id = c.id AND NOT EXISTS (SELECT 1 FROM dias_inhabiles di WHERE di.clase_id = a.clase_id AND di.fecha = a.fecha) AND a.usuario_id = :m2 AND a.estado = 'presente') AS presentes,
             (SELECT COUNT(DISTINCT a.fecha) FROM asistencias a
-              WHERE a.clase_id = c.id AND a.usuario_id = :m3 AND a.estado = 'retardo') AS retardos,
+              WHERE a.clase_id = c.id AND NOT EXISTS (SELECT 1 FROM dias_inhabiles di WHERE di.clase_id = a.clase_id AND di.fecha = a.fecha) AND a.usuario_id = :m3 AND a.estado = 'retardo') AS retardos,
             (SELECT COUNT(DISTINCT a.fecha) FROM asistencias a
-              WHERE a.clase_id = c.id AND a.usuario_id = :m4 AND a.estado = 'justificado') AS justificados
+              WHERE a.clase_id = c.id AND NOT EXISTS (SELECT 1 FROM dias_inhabiles di WHERE di.clase_id = a.clase_id AND di.fecha = a.fecha) AND a.usuario_id = :m4 AND a.estado = 'justificado') AS justificados
         FROM inscripciones i
         JOIN clases c ON c.id = i.clase_id
         JOIN usuarios doc ON doc.matricula = c.docente_id
@@ -81,7 +81,7 @@ try {
             // Todas las fechas en que se pasó lista, con el registro del alumno
             $stmtDetalle = $pdo->prepare("
                 SELECT f.fecha, a.estado, a.hora, a.tipo, d.nombre AS autorizo_nombre
-                FROM (SELECT DISTINCT fecha FROM asistencias WHERE clase_id = :c1) f
+                FROM (SELECT DISTINCT a.fecha FROM asistencias a WHERE a.clase_id = :c1 AND NOT EXISTS (SELECT 1 FROM dias_inhabiles di WHERE di.clase_id = a.clase_id AND di.fecha = a.fecha)) f
                 LEFT JOIN asistencias a
                        ON a.fecha = f.fecha AND a.clase_id = :c2 AND a.usuario_id = :m
                 LEFT JOIN usuarios d ON d.matricula = a.docente_autorizo_id
@@ -102,6 +102,18 @@ foreach ($misClases as $c) {
     $totalSesiones  += (int)$c['sesiones'];
     $totalAsistidas += min((int)$c['asistidas'], (int)$c['sesiones']);
 }
+// Materias en riesgo: faltas (sin justificar) >= límite de la materia.
+// "Por llegar" = a una falta del límite.
+$materiasRiesgo = [];
+foreach ($misClases as $c) {
+    $limite = (int)$c['limite_faltas'];
+    $faltasC = max(0, (int)$c['sesiones'] - min((int)$c['asistidas'], (int)$c['sesiones']));
+    if ($limite > 0 && $faltasC >= $limite - 1) {
+        $materiasRiesgo[] = ['nombre' => $c['nombre_materia'], 'faltas' => $faltasC,
+                             'limite' => $limite, 'excedido' => $faltasC >= $limite];
+    }
+}
+
 // null = todavía no se ha pasado lista en ninguna de sus materias.
 $porcentajeGeneral = $totalSesiones > 0 ? round(($totalAsistidas / $totalSesiones) * 100) : null;
 
@@ -133,6 +145,18 @@ require_once __DIR__ . '/header.php';
     </div>
 
 <?php else: ?>
+
+    <?php foreach ($materiasRiesgo as $r): ?>
+        <div class="alert <?php echo $r['excedido'] ? 'alert-danger' : 'alert-warning'; ?>">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            <span>
+                <strong><?php echo htmlspecialchars($r['nombre']); ?></strong>:
+                <?php echo $r['excedido']
+                    ? "llegaste al límite de faltas ({$r['faltas']} de {$r['limite']}). Estás en riesgo de perder el derecho a evaluación."
+                    : "llevas {$r['faltas']} de {$r['limite']} faltas permitidas. Una más y estarás en riesgo."; ?>
+            </span>
+        </div>
+    <?php endforeach; ?>
 
     <!-- RESUMEN GENERAL -->
     <div class="stats-grid">
@@ -229,6 +253,14 @@ require_once __DIR__ . '/header.php';
                             <td><?php echo (int)$c['retardos']; ?></td>
                             <td>
                                 <strong style="color: <?php echo $faltas > 0 ? 'var(--danger)' : 'inherit'; ?>;"><?php echo $faltas; ?></strong>
+                                <?php if ((int)$c['limite_faltas'] > 0): ?>
+                                    <span style="font-size: 0.75rem; color: var(--text-muted);">/ <?php echo (int)$c['limite_faltas']; ?></span>
+                                    <?php if ($faltas >= (int)$c['limite_faltas']): ?>
+                                        <div><span class="badge badge-falta">EN RIESGO</span></div>
+                                    <?php elseif ($faltas === (int)$c['limite_faltas'] - 1): ?>
+                                        <div><span class="badge badge-retardo">PRECAUCIÓN</span></div>
+                                    <?php endif; ?>
+                                <?php endif; ?>
                                 <?php if ((int)$c['justificados'] > 0): ?>
                                     <div style="font-size: 0.7rem; color: var(--text-muted);"><?php echo (int)$c['justificados']; ?> justificadas</div>
                                 <?php endif; ?>
@@ -297,6 +329,13 @@ require_once __DIR__ . '/header.php';
                                             <?php echo htmlspecialchars($d['autorizo_nombre'] ?: 'Firma del docente'); ?>
                                         <?php else: ?>
                                             <span style="color: var(--text-muted);">No registraste asistencia</span>
+                                        <?php endif; ?>
+                                        <?php if (!$d['estado'] || $d['estado'] === 'falta'): ?>
+                                            <div>
+                                                <a href="justificar.php?clase_id=<?php echo (int)$claseDetalle['id']; ?>&fecha=<?php echo urlencode($d['fecha']); ?>" style="font-size: 0.78rem;">
+                                                    <i class="fa-solid fa-file-medical"></i> Justificar esta falta
+                                                </a>
+                                            </div>
                                         <?php endif; ?>
                                     </td>
                                 </tr>

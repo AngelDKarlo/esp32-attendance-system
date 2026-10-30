@@ -33,7 +33,7 @@ function horaAhora() {
 // -------------------------------------------------------------------------
 // CONFIGURACIÓN DE TELEGRAM BOT
 // -------------------------------------------------------------------------
-define('TELEGRAM_BOT_TOKEN', '8009530562:AAEl4kNo-GTmbCE6OVvMpCA5GK3y7N7qRTA');
+define('TELEGRAM_BOT_TOKEN', '8981258858:AAFg97eU1O0udEffjQkGN7XTEvWTXwtUNH4');
 
 // -------------------------------------------------------------------------
 // CONFIGURACIÓN DE HORARIOS (tolerancia en minutos)
@@ -45,3 +45,14 @@ define('TOLERANCIA_FALTA', 20);   // Minutos tras el inicio para considerarse "F
 // ENROLAMIENTO DE TARJETAS RFID
 // -------------------------------------------------------------------------
 define('ENROL_TIMEOUT_SEGUNDOS', 60); // Ventana para acercar la tarjeta al lector
+
+// -------------------------------------------------------------------------
+// CRITERIOS ACADÉMICOS
+// -------------------------------------------------------------------------
+define('PORCENTAJE_MINIMO_ASISTENCIA', 80); // Por debajo de esto el alumno queda en riesgo de reprobar
+
+// -------------------------------------------------------------------------
+// JUSTIFICANTES (fotos / recetas que sube el alumno)
+// -------------------------------------------------------------------------
+define('JUSTIFICANTES_DIR', __DIR__ . '/../uploads/justificantes');
+define('JUSTIFICANTE_MAX_BYTES', 5 * 1024 * 1024); // 5 MB

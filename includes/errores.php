@@ -42,7 +42,7 @@ function mensajeErrorBD(PDOException $e, $accion, $rol = null, $origen = '') {
           || $codigoMysql === 1146 || $codigoMysql === 1054:
             return $esAdmin
                 ? "No se pudo $accion porque la base de datos está incompleta. "
-                . 'Ejecuta database/migracion_v2.sql sobre la base del sistema.'
+                . 'Importa database/esp32_attendance.sql en la base del sistema.'
                 : "No se pudo $accion porque el sistema está a medio actualizar. "
                 . 'Avísale al administrador.';
 

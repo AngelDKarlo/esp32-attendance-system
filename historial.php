@@ -103,6 +103,10 @@ if (!empty($_GET['clase_id'])) {
     $where[] = "a.clase_id = :clase_id";
     $params['clase_id'] = $_GET['clase_id'];
 }
+if (!empty($_GET['estado']) && in_array($_GET['estado'], $estadosValidos, true)) {
+    $where[] = "a.estado = :estado_filtro";
+    $params['estado_filtro'] = $_GET['estado'];
+}
 if ($rol === 'administrativo') {
     if (!empty($_GET['rol_filtro'])) {
         $where[] = "u.rol = :rol_filtro";
@@ -319,6 +323,16 @@ require_once __DIR__ . '/header.php';
                                 (<?php echo htmlspecialchars($c['carrera'] . ' - ' . $c['grupo']); ?>)
                             <?php endif; ?>
                         </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 0;">
+                <label for="estado">ESTADO</label>
+                <select id="estado" name="estado" class="form-select">
+                    <option value="">Todos los estados</option>
+                    <?php foreach ($estadosValidos as $ev): ?>
+                        <option value="<?php echo $ev; ?>" <?php echo (($_GET['estado'] ?? '') === $ev) ? 'selected' : ''; ?>><?php echo ucfirst($ev); ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>

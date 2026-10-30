@@ -186,23 +186,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // -------------------------------------------------------------------------
-// ELIMINAR USUARIO
+// BAJA / REACTIVACIÓN LÓGICA
+//
+// No se borra el registro: conserva el historial de asistencias. Un usuario
+// inactivo no puede iniciar sesión ni registrar asistencia.
 // -------------------------------------------------------------------------
-if (isset($_GET['eliminar'])) {
-    $matriculaEliminar = trim($_GET['eliminar']);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['accion'] ?? '', ['baja', 'reactivar'], true)) {
+    $matriculaCambio = trim($_POST['matricula'] ?? '');
+    $nuevoEstado = ($_POST['accion'] === 'baja') ? 'inactivo' : 'activo';
 
-    if ($matriculaEliminar === $user['matricula']) {
-        $error = 'No puedes eliminar tu propio usuario mientras tienes la sesión abierta.';
+    if ($matriculaCambio === $user['matricula'] && $nuevoEstado === 'inactivo') {
+        $error = 'No puedes darte de baja a ti mismo mientras tienes la sesión abierta.';
     } else {
         try {
-            $stmt = $pdo->prepare("DELETE FROM usuarios WHERE matricula = :m");
-            $stmt->execute(['m' => $matriculaEliminar]);
-            $success = $stmt->rowCount() > 0
-                ? 'Usuario eliminado junto con su historial de asistencias.'
-                : 'Ese usuario ya no existe en el sistema.';
+            $stmt = $pdo->prepare("UPDATE usuarios SET estado = :e WHERE matricula = :m");
+            $stmt->execute(['e' => $nuevoEstado, 'm' => $matriculaCambio]);
+            $success = $nuevoEstado === 'inactivo'
+                ? "Usuario $matriculaCambio dado de baja. Su historial se conserva."
+                : "Usuario $matriculaCambio reactivado.";
         } catch (PDOException $e) {
-            $error = mensajeErrorBD($e, 'eliminar el usuario', $user['rol'] ?? null, 'usuarios.php');
+            $error = mensajeErrorBD($e, 'cambiar el estado del usuario', $user['rol'] ?? null, 'usuarios.php');
         }
+    }
+}
+
+// -------------------------------------------------------------------------
+// RESTABLECER CONTRASEÑA (genera una temporal y se muestra una sola vez)
+// -------------------------------------------------------------------------
+$passwordTemporal = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'reset_password') {
+    $matriculaReset = trim($_POST['matricula'] ?? '');
+    $alfabeto = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    $temporal = '';
+    for ($k = 0; $k < 8; $k++) {
+        $temporal .= $alfabeto[random_int(0, strlen($alfabeto) - 1)];
+    }
+
+    try {
+        $stmt = $pdo->prepare("UPDATE usuarios SET contrasena = :c WHERE matricula = :m");
+        $stmt->execute(['c' => password_hash($temporal, PASSWORD_DEFAULT), 'm' => $matriculaReset]);
+        if ($stmt->rowCount() > 0) {
+            $passwordTemporal = ['matricula' => $matriculaReset, 'clave' => $temporal];
+            $success = "Contraseña de $matriculaReset restablecida.";
+        } else {
+            $error = 'No se encontró ese usuario.';
+        }
+    } catch (PDOException $e) {
+        $error = mensajeErrorBD($e, 'restablecer la contraseña', $user['rol'] ?? null, 'usuarios.php');
     }
 }
 
@@ -246,7 +276,7 @@ require_once __DIR__ . '/header.php';
 <div class="top-bar">
     <div class="page-title">
         <h2>Gestión de Usuarios</h2>
-        <p>Da de alta, edita o elimina cuentas. Desde aquí también se registran las tarjetas RFID con el lector de la caja.</p>
+        <p>Da de alta, edita, da de baja o restablece contraseñas. Desde aquí también se registran las tarjetas RFID con el lector de la caja.</p>
     </div>
 </div>
 
@@ -254,6 +284,15 @@ require_once __DIR__ . '/header.php';
     <div class="alert alert-danger">
         <i class="fa-solid fa-circle-exclamation"></i>
         <span><?php echo htmlspecialchars($error); ?></span>
+    </div>
+<?php endif; ?>
+
+<?php if (!empty($passwordTemporal)): ?>
+    <div class="alert alert-success">
+        <i class="fa-solid fa-key"></i>
+        <span>Contraseña temporal de <strong><?php echo htmlspecialchars($passwordTemporal['matricula']); ?></strong>:
+            <code style="font-size: 1.05rem; user-select: all;"><?php echo htmlspecialchars($passwordTemporal['clave']); ?></code>
+            — se muestra solo ahora; entrégala al usuario.</span>
     </div>
 <?php endif; ?>
 
@@ -483,13 +522,31 @@ require_once __DIR__ . '/header.php';
                                         </a>
                                         <?php // La tarjeta se registra desde el formulario de edición
                                               // (botón "Leer"), para no duplicar el mismo flujo aquí. ?>
-                                        <?php if ($u['matricula'] !== $user['matricula']): ?>
-                                            <a href="usuarios.php?eliminar=<?php echo urlencode($u['matricula']); ?>"
-                                               class="btn-action btn-delete"
-                                               onclick="return confirm('Se eliminará a <?php echo htmlspecialchars($u['nombre'], ENT_QUOTES); ?> y todo su historial de asistencias. ¿Continuar?')"
-                                               title="Eliminar usuario">
-                                                <i class="fa-solid fa-trash"></i>
-                                            </a>
+                                        <form action="usuarios.php" method="POST" style="display: inline;"
+                                              onsubmit="return confirm('¿Restablecer la contraseña de <?php echo htmlspecialchars($u['nombre'], ENT_QUOTES); ?>? Se generará una temporal.')">
+                                            <input type="hidden" name="accion" value="reset_password">
+                                            <input type="hidden" name="matricula" value="<?php echo htmlspecialchars($u['matricula']); ?>">
+                                            <button type="submit" class="btn-action" title="Restablecer contraseña">
+                                                <i class="fa-solid fa-key"></i>
+                                            </button>
+                                        </form>
+                                        <?php if ($u['estado'] === 'inactivo'): ?>
+                                            <form action="usuarios.php" method="POST" style="display: inline;">
+                                                <input type="hidden" name="accion" value="reactivar">
+                                                <input type="hidden" name="matricula" value="<?php echo htmlspecialchars($u['matricula']); ?>">
+                                                <button type="submit" class="btn-action" title="Reactivar usuario" style="color: #22c55e;">
+                                                    <i class="fa-solid fa-user-check"></i>
+                                                </button>
+                                            </form>
+                                        <?php elseif ($u['matricula'] !== $user['matricula']): ?>
+                                            <form action="usuarios.php" method="POST" style="display: inline;"
+                                                  onsubmit="return confirm('¿Dar de baja a <?php echo htmlspecialchars($u['nombre'], ENT_QUOTES); ?>? No podrá entrar al sistema, pero su historial se conserva.')">
+                                                <input type="hidden" name="accion" value="baja">
+                                                <input type="hidden" name="matricula" value="<?php echo htmlspecialchars($u['matricula']); ?>">
+                                                <button type="submit" class="btn-action btn-delete" title="Dar de baja">
+                                                    <i class="fa-solid fa-user-slash"></i>
+                                                </button>
+                                            </form>
                                         <?php endif; ?>
                                     </div>
                                 </td>

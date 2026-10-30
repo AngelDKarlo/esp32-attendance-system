@@ -140,6 +140,209 @@ function determinarEstadoAsistencia($clase, $hora = null) {
 }
 
 // =========================================================================
+// DÍAS INHÁBILES, CURSOS Y ESTADÍSTICAS
+// =========================================================================
+
+/**
+ * ¿El docente marcó esa fecha como día inhábil para esa clase?
+ * Un día inhábil no se pasa lista ni cuenta para el porcentaje.
+ */
+function esDiaInhabil($pdo, $claseId, $fecha = null) {
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM dias_inhabiles WHERE clase_id = :c AND fecha = :f");
+    $stmt->execute(['c' => $claseId, 'f' => $fecha ?: fechaHoy()]);
+    return $stmt->fetchColumn() > 0;
+}
+
+/**
+ * Valida que la lectura de la caja corresponda a una clase real y vigente.
+ *
+ * El pase de lista es SIEMPRE por clase: si un alumno o docente pasa la
+ * tarjeta fuera de su horario no se guarda nada. Antes se guardaba un
+ * "pase general" sin clase y se bloqueaba cualquier otro intento durante
+ * una hora, por lo que parecía que solo se podía pasar lista una vez.
+ * Termina la ejecución con un error para la caja si no procede.
+ */
+function validarClaseParaRegistro($pdo, $usuario, $claseActiva) {
+    if (!$claseActiva) {
+        if (in_array($usuario['rol'], ['alumno', 'docente'], true)) {
+            responderError(
+                "No tienes una clase en este horario. Pasa lista dentro de tu clase.",
+                "Sin clase ahora"
+            );
+        }
+        return;
+    }
+
+    if (esDiaInhabil($pdo, $claseActiva['id'])) {
+        responderError("El docente marcó hoy como día inhábil: no se pasa lista.", "Dia inhabil");
+    }
+}
+
+/**
+ * Fecha más reciente (hoy o antes) que cae en el día de la semana indicado.
+ */
+function ultimaFechaDeDia($diaSemana) {
+    $numeros = ['lunes' => 1, 'martes' => 2, 'miercoles' => 3, 'jueves' => 4, 'viernes' => 5, 'sabado' => 6];
+    $objetivo = $numeros[$diaSemana] ?? (int)date('N');
+    $atras = ((int)date('N') - $objetivo + 7) % 7;
+    return date('Y-m-d', strtotime("-$atras days", strtotime(fechaHoy())));
+}
+
+/**
+ * Agrupa las clases de un docente en "cursos": la misma materia, carrera,
+ * grupo y semestre se da en varios días y cada día es una fila de `clases`.
+ * Los porcentajes del alumno se calculan sobre el curso completo.
+ *
+ * @param string|null $docenteId Matrícula del docente; null = todos (admin).
+ * @return array Lista de cursos con 'clases' y 'clase_ids'.
+ */
+function cursosDeDocente($pdo, $docenteId = null) {
+    $sql = "
+        SELECT c.*, doc.nombre AS docente_nombre,
+               (SELECT COUNT(*) FROM inscripciones i WHERE i.clase_id = c.id) AS inscritos
+        FROM clases c
+        JOIN usuarios doc ON doc.matricula = c.docente_id
+    ";
+    $params = [];
+    if ($docenteId !== null) {
+        $sql .= " WHERE c.docente_id = :d";
+        $params['d'] = $docenteId;
+    }
+    $sql .= " ORDER BY c.nombre_materia, c.carrera, c.grupo, c.semestre,
+              FIELD(c.dia_semana,'lunes','martes','miercoles','jueves','viernes','sabado'), c.hora_inicio";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+
+    $cursos = [];
+    foreach ($stmt->fetchAll() as $c) {
+        $clave = implode('|', [$c['docente_id'], $c['nombre_materia'], $c['carrera'], $c['grupo'], $c['semestre']]);
+        if (!isset($cursos[$clave])) {
+            $cursos[$clave] = [
+                'clave' => md5($clave),
+                'nombre_materia' => $c['nombre_materia'],
+                'carrera' => $c['carrera'],
+                'grupo' => $c['grupo'],
+                'semestre' => $c['semestre'],
+                'docente_id' => $c['docente_id'],
+                'docente_nombre' => $c['docente_nombre'],
+                'clases' => [],
+                'clase_ids' => [],
+            ];
+        }
+        $cursos[$clave]['clases'][] = $c;
+        $cursos[$clave]['clase_ids'][] = (int)$c['id'];
+    }
+    return array_values($cursos);
+}
+
+/**
+ * Estadísticas de asistencia de todos los alumnos inscritos en un curso.
+ *
+ * - "Sesiones" son los días en que de verdad hubo clase: las fechas con algún
+ *   registro, sin contar los días marcados como inhábiles.
+ * - Asistió = presente, retardo o justificado. Faltas = sesiones - asistidas.
+ *
+ * @param int[] $claseIds Ids de `clases` que forman el curso.
+ * @return array ['sesiones' => int, 'alumnos' => [...], 'bajo_minimo' => int, 'promedio' => float|null]
+ */
+function estadisticasCurso($pdo, array $claseIds) {
+    $vacio = ['sesiones' => 0, 'alumnos' => [], 'bajo_minimo' => 0, 'promedio' => null];
+    if (empty($claseIds)) {
+        return $vacio;
+    }
+    $claseIds = array_map('intval', $claseIds);
+    $in = implode(',', $claseIds);
+
+    $noInhabil = "NOT EXISTS (SELECT 1 FROM dias_inhabiles di WHERE di.clase_id = a.clase_id AND di.fecha = a.fecha)";
+
+    $sesiones = (int)$pdo->query("
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT a.clase_id, a.fecha FROM asistencias a
+            WHERE a.clase_id IN ($in) AND $noInhabil
+        ) t
+    ")->fetchColumn();
+
+    $stmt = $pdo->query("
+        SELECT u.matricula, u.nombre, u.estado AS estado_usuario,
+               COUNT(DISTINCT CASE WHEN a.estado = 'presente'    THEN CONCAT(a.clase_id, '|', a.fecha) END) AS presentes,
+               COUNT(DISTINCT CASE WHEN a.estado = 'retardo'     THEN CONCAT(a.clase_id, '|', a.fecha) END) AS retardos,
+               COUNT(DISTINCT CASE WHEN a.estado = 'justificado' THEN CONCAT(a.clase_id, '|', a.fecha) END) AS justificados
+        FROM inscripciones i
+        JOIN usuarios u ON u.matricula = i.alumno_id
+        LEFT JOIN asistencias a
+               ON a.usuario_id = u.matricula AND a.clase_id = i.clase_id AND $noInhabil
+        WHERE i.clase_id IN ($in)
+        GROUP BY u.matricula, u.nombre, u.estado
+        ORDER BY u.nombre
+    ");
+
+    $alumnos = [];
+    $sumaPct = 0;
+    $conPct = 0;
+    $bajo = 0;
+    foreach ($stmt->fetchAll() as $r) {
+        $asistidas = min($sesiones, (int)$r['presentes'] + (int)$r['retardos'] + (int)$r['justificados']);
+        $pct = $sesiones > 0 ? ($asistidas / $sesiones) * 100 : null;
+        $enRiesgo = $pct !== null && $pct < PORCENTAJE_MINIMO_ASISTENCIA;
+
+        if ($pct !== null) {
+            $sumaPct += $pct;
+            $conPct++;
+            if ($enRiesgo) {
+                $bajo++;
+            }
+        }
+
+        $alumnos[$r['matricula']] = [
+            'matricula' => $r['matricula'],
+            'nombre' => $r['nombre'],
+            'estado_usuario' => $r['estado_usuario'],
+            'presentes' => (int)$r['presentes'],
+            'retardos' => (int)$r['retardos'],
+            'justificados' => (int)$r['justificados'],
+            'asistidas' => $asistidas,
+            'faltas' => max(0, $sesiones - $asistidas),
+            'porcentaje' => $pct,
+            'en_riesgo' => $enRiesgo,
+        ];
+    }
+
+    return [
+        'sesiones' => $sesiones,
+        'alumnos' => $alumnos,
+        'bajo_minimo' => $bajo,
+        'promedio' => $conPct > 0 ? $sumaPct / $conPct : null,
+    ];
+}
+
+/**
+ * Porcentaje para mostrar: sin decimales si es entero ("80%"), con uno si no ("79.6%").
+ */
+function formatoPorcentaje($pct) {
+    if ($pct === null) {
+        return '—';
+    }
+    $r = round($pct, 1);
+    return ($r == floor($r) ? (string)(int)$r : number_format($r, 1)) . '%';
+}
+
+/**
+ * Justificantes pendientes de revisar para un docente (todos si es admin).
+ */
+function contarJustificantesPendientes($pdo, $docenteId = null) {
+    $sql = "SELECT COUNT(*) FROM justificantes j JOIN clases c ON c.id = j.clase_id WHERE j.estado = 'pendiente'";
+    $params = [];
+    if ($docenteId !== null) {
+        $sql .= " AND c.docente_id = :d";
+        $params['d'] = $docenteId;
+    }
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    return (int)$stmt->fetchColumn();
+}
+
+// =========================================================================
 // DISPOSITIVOS (cajas ESP32)
 // =========================================================================
 
@@ -349,6 +552,9 @@ function generarFaltasParaClaseYFecha($pdo, $claseId, $fecha) {
 
     $esHoy = ($fecha === fechaHoy());
     if ($fecha > fechaHoy()) {
+        return 0;
+    }
+    if (esDiaInhabil($pdo, $claseId, $fecha)) {
         return 0;
     }
     if ($esHoy && horaAhora() <= $clase['hora_fin']) {
